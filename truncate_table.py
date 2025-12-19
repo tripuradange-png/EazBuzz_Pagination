@@ -44,9 +44,9 @@ try:
     print(f"\nRecords before truncate: {count_before}")
 
     # Truncate table
-    print("\nTruncating payment_transactions table...")
-    client.execute("TRUNCATE TABLE payment_transactions")
-    print("Successfully truncated payment_transactions table")
+    print("\nTruncating test_payment_transactions table...")
+    client.execute("TRUNCATE TABLE test_payment_transactions")
+    print("Successfully truncated test_payment_transactions table")
 
     # Get count after truncate
     result = client.execute("SELECT count() FROM payment_transactions")
