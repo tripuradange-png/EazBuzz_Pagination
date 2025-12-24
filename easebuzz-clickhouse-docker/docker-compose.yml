@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  easebuzz_clickhouse:
+    build: .
+    container_name: easebuzz_clickhouse
+    environment:
+      # SSH Configuration
+      - SSH_HOST=3.7.169.181
+      - SSH_PORT=22
+      - SSH_USERNAME=ubuntu
+      - SSH_KEY_PATH=/keys/SML_Castlecraft.pem
+
+      # ClickHouse Configuration
+      - CH_HOST=127.0.0.1
+      - CH_PORT=9000
+      - CH_USER=default
+      - CH_PASSWORD=aSh49aVjfy8P
+      - CH_DATABASE=default
+    volumes:
+      - ./keys:/keys:ro
+    restart: "no"  # Changed from unless-stopped to "no" for manual/scheduled runs

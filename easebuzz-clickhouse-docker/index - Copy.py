@@ -646,97 +646,52 @@ class EasebuzzAPI:
 
         return all_transactions
 
-    def get_and_retrieve_transaction_details(self, start_date, end_date, hash_value, limit=None, db_handler=None):
+    def get_and_retrieve_transaction_details(self, start_date, end_date, hash_value, limit=None):
         """
         Fetch transactions by date and retrieve detailed information for each transaction.
-        Now supports pagination to fetch ALL transactions with automatic token refresh.
 
         Args:
             start_date (str): Start date in format "DD-MM-YYYY"
             end_date (str): End date in format "DD-MM-YYYY"
             hash_value (str): Hash value for request authentication
             limit (int, optional): Limit number of transactions to retrieve details for
-            db_handler: ClickHouseDB instance to push data in batches (optional)
 
         Returns:
             list: List of detailed transaction data
         """
-        print("\n=== Step 1: Fetching ALL transactions by date with pagination ===")
+        print("\n=== Step 1: Fetching transactions by date ===")
 
-        all_transactions = []
-        page_token = None
-        page_number = 1
+        # Get transactions from date API
+        result = self.get_transactions_by_date(
+            start_date=start_date,
+            end_date=end_date,
+            hash_value=hash_value
+        )
 
-        # Fetch all pages
-        while True:
-            print(f"\n{'='*80}")
-            print(f"--- Fetching transaction list page {page_number} ---")
-            print(f"{'='*80}")
-
-            # Get transactions from date API
-            result = self.get_transactions_by_date(
-                start_date=start_date,
-                end_date=end_date,
-                hash_value=hash_value,
-                page_token=page_token
-            )
-
-            if not result or not result.get('status'):
-                print("Failed to fetch transactions")
-                break
-
-            transactions = result.get('data', [])
-            all_transactions.extend(transactions)
-            print(f"Retrieved {len(transactions)} transactions from page {page_number}")
-            print(f"Total transactions so far: {len(all_transactions)}")
-
-            # Check if there's a next page
-            next_token = result.get('next')
-            if not next_token:
-                print(f"\nNo more pages. Total transactions found: {len(all_transactions)}")
-                break
-
-            # Use the next token for the next iteration
-            page_token = next_token
-            page_number += 1
-
-        if not all_transactions:
-            print("No transactions found")
+        if not result or not result.get('status'):
+            print("Failed to fetch transactions")
             return []
 
-        # Apply limit if specified
-        transactions_to_process = all_transactions
-        if limit:
-            transactions_to_process = all_transactions[:limit]
-            print(f"\nLimiting to first {limit} transactions out of {len(all_transactions)} total")
+        transactions = result.get('data', [])
+        print(f"\nFound {len(transactions)} transactions")
 
-        print(f"\n{'='*100}")
-        print(f"=== Step 2: Retrieving detailed information for {len(transactions_to_process)} transactions ===")
-        print(f"{'='*100}")
+        # Apply limit if specified
+        if limit:
+            transactions = transactions[:limit]
+            print(f"Limiting to first {limit} transactions")
+
+        print("\n=== Step 2: Retrieving detailed information for each transaction ===")
 
         detailed_transactions = []
-        batch_size = 50  # Insert to DB every 50 transactions
 
-        for idx, txn in enumerate(transactions_to_process, 1):
+        for idx, txn in enumerate(transactions, 1):
             txnid = txn.get('txnid')
             if not txnid:
-                print(f"[{idx}/{len(transactions_to_process)}] Skipping - No txnid found")
+                print(f"[{idx}/{len(transactions)}] Skipping - No txnid found")
                 continue
-
-            # Skip if already in database
-            if db_handler and db_handler.transaction_exists(txnid):
-                print(f"[{idx}/{len(transactions_to_process)}] Skipping - Already in database: {txnid}")
-                continue
-
-            # Refresh token every 100 transactions or if expired
-            if idx % 100 == 0 or self.is_token_expired():
-                print(f"\n[Token Refresh] Refreshing authentication token...")
-                if not self.get_auth_token(force_refresh=True):
-                    print(f"[ERROR] Failed to refresh token at transaction {idx}")
-                    break
 
             print(f"\n{'*'*80}")
-            print(f"[{idx}/{len(transactions_to_process)}] Fetching details for txnid: {txnid}")
+            print(f"[{idx}/{len(transactions)}] Fetching details for txnid: {txnid}")
             print(f"{'*'*80}")
 
             # Retrieve detailed transaction information
@@ -744,30 +699,17 @@ class EasebuzzAPI:
 
             if details:
                 detailed_transactions.append(details)
-                print(f"[OK] Successfully retrieved details for transaction {idx}/{len(transactions_to_process)}")
-
-                # Insert in batches if db_handler provided
-                if db_handler and len(detailed_transactions) >= batch_size:
-                    print(f"\n[Batch Insert] Inserting {len(detailed_transactions)} transactions to database...")
-                    inserted = db_handler.insert_detailed_transactions(detailed_transactions)
-                    print(f"[Batch Insert] Successfully inserted {inserted} transactions")
-                    detailed_transactions = []  # Clear batch
+                print(f"[OK] Successfully retrieved details for transaction {idx}/{len(transactions)}")
             else:
-                print(f"[FAIL] Failed to retrieve details for transaction {idx}/{len(transactions_to_process)}")
-
-        # Insert any remaining transactions in final batch
-        if db_handler and len(detailed_transactions) > 0:
-            print(f"\n[Final Batch Insert] Inserting remaining {len(detailed_transactions)} transactions to database...")
-            inserted = db_handler.insert_detailed_transactions(detailed_transactions)
-            print(f"[Final Batch Insert] Successfully inserted {inserted} transactions")
+                print(f"[FAIL] Failed to retrieve details for transaction {idx}/{len(transactions)}")
 
         print(f"\n{'='*100}")
         print(f"{'='*100}")
         print(f"{'FINAL SUMMARY':^100}")
         print(f"{'='*100}")
-        print(f"Total transactions found across all pages: {len(all_transactions)}")
-        print(f"Transactions processed for details: {len(transactions_to_process)}")
-        print(f"Successfully retrieved details: {len(detailed_transactions) if not db_handler else 'Inserted in batches'}")
+        print(f"Total transactions found: {len(transactions)}")
+        print(f"Successfully retrieved details: {len(detailed_transactions)}")
+        print(f"Failed: {len(transactions) - len(detailed_transactions)}")
         print(f"{'='*100}\n")
 
         # Display consolidated view of all retrieved transactions
@@ -814,56 +756,55 @@ def main():
             # Step 3: Retrieve transactions
             hash_value = "b80cdee1da064dc20f50d4fd87b70a2d81bf4cb3fc6945fa50072498d77dae75e7158bcdbad619e03fa8f524fa4ddcf742a54b61a6798fb9fa3dc43fd99bcf94"
 
-            # Get the last transaction date from database to know where to start fetching
-            print("\n=== Checking last transaction in database ===")
-            last_txn_result = db.client.execute("SELECT MAX(addedon) FROM test_payment_transactions")
-            last_txn_date = last_txn_result[0][0] if last_txn_result[0][0] else None
-
-            if last_txn_date:
-                # Parse the last transaction date and use it as start date
-                from datetime import datetime as dt
-                last_date_obj = dt.strptime(last_txn_date, "%Y-%m-%d %H:%M:%S")
-                start_date = last_date_obj.strftime("%d-%m-%Y")
-                print(f"Last transaction in DB: {last_txn_date}")
-                print(f"Will fetch from: {start_date}")
-            else:
-                # No data in DB, start from today
-                start_date = datetime.now().strftime("%d-%m-%Y")
-                print(f"No transactions in DB yet. Starting from: {start_date}")
-
-            # Always use today as end date to get latest data
-            end_date = datetime.now().strftime("%d-%m-%Y")
-            print(f"Fetching up to: {end_date} (current date)")
-
             # OPTION 1: Fetch transaction details dynamically from date API
-            print("\n=== Fetching all available transactions with auto token refresh ===")
+            print("\n=== NEW FEATURE: Fetching transaction details dynamically ===")
             detailed_transactions = easebuzz.get_and_retrieve_transaction_details(
-                start_date=start_date,
-                end_date=end_date,
+                start_date="19-12-2025",
+                end_date="19-12-2025",
                 hash_value=hash_value,
-                limit=None,  # Fetch all transactions
-                db_handler=db  # Pass database handler for batch insertion and duplicate checking
+                limit=10  # Limit to first 10 transactions for testing (remove limit to fetch all)
             )
 
-            print(f"\n{'#'*100}")
-            print(f"{'SUCCESS':^100}")
-            print(f"{'#'*100}")
-            print(f"[OK] Completed processing transactions from {start_date} to {end_date}")
-            print(f"[OK] All transactions inserted in batches directly to database")
+            if detailed_transactions:
+                print(f"\n{'#'*100}")
+                print(f"{'SUCCESS':^100}")
+                print(f"{'#'*100}")
+                print(f"[OK] Retrieved detailed information for {len(detailed_transactions)} transactions")
 
-            # Get updated total count from database
-            total_in_db = db.get_transaction_count()
-            print(f"[OK] Total transactions in database: {total_in_db}")
+                # Save detailed transactions to JSON
+                output_file = 'detailed_transactions.json'
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(detailed_transactions, f, indent=4, ensure_ascii=False)
 
-            # Display recent transactions with addedon and error_message
-            print(f"\n=== Verifying Saved Data (Last 20 transactions) ===")
-            db.get_transactions_with_details(limit=20)
+                print(f"[OK] Detailed transactions saved to '{output_file}'")
 
-            print(f"\nData successfully saved to:")
-            print(f"  1. ClickHouse database table: test_payment_transactions")
-            print(f"     Fields saved: addedon, error_message (along with all other fields)")
-            print(f"  2. Verification table above showing addedon & error_message values")
-            print(f"{'#'*100}\n")
+                # Insert detailed transactions into database
+                print(f"\n=== Inserting detailed transactions into ClickHouse ===")
+                inserted_count = db.insert_detailed_transactions(detailed_transactions)
+                print(f"[OK] Inserted {inserted_count} detailed transactions into database")
+
+                # Get updated total count from database
+                total_in_db = db.get_transaction_count()
+                print(f"[OK] Total transactions in database: {total_in_db}")
+
+                # Display the inserted transactions with addedon and error_message
+                print(f"\n=== Verifying Saved Data ===")
+                db.get_transactions_with_details(limit=inserted_count)
+
+                print(f"\nYou can view the full records in:")
+                print(f"  1. Console output above (search for 'TRANSACTION DETAILS - FULL RESPONSE')")
+                print(f"  2. File: {output_file}")
+                print(f"  3. ClickHouse database table: test_payment_transactions")
+                print(f"     Fields saved: addedon, error_message (along with all other fields)")
+                print(f"  4. Verification table above showing addedon & error_message values")
+                print(f"{'#'*100}\n")
+            else:
+                print(f"\n{'!'*100}")
+                print(f"{'WARNING':^100}")
+                print(f"{'!'*100}")
+                print("No detailed transactions were retrieved.")
+                print("Check the console output above for any errors.")
+                print(f"{'!'*100}\n")
 
             # print("\n" + "="*80)
 

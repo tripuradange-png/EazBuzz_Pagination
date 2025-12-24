@@ -1,0 +1,5 @@
+requests
+tabulate
+sshtunnel
+clickhouse-driver
+paramiko<3.0.0

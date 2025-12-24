@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 from datetime import datetime
 from tabulate import tabulate
 from sshtunnel import SSHTunnelForwarder
@@ -9,17 +10,17 @@ from clickhouse_driver import Client
 class ClickHouseDB:
     def __init__(self):
         # SSH Configuration
-        self.ssh_host = '3.7.169.181'
-        self.ssh_port = 22
-        self.ssh_username = 'ubuntu'
-        self.ssh_key_path = r'D:\ClickHouse\SML_Castlecraft.pem'
+        self.ssh_host = os.getenv("SSH_HOST", "3.7.169.181")
+        self.ssh_port = int(os.getenv("SSH_PORT", "22"))
+        self.ssh_username = os.getenv("SSH_USERNAME", "ubuntu")
+        self.ssh_key_path = os.getenv("SSH_KEY_PATH", "/keys/SML_Castlecraft.pem")
 
         # ClickHouse Configuration
-        self.ch_host = '127.0.0.1'
-        self.ch_port = 9000
-        self.ch_user = 'default'
-        self.ch_password = 'aSh49aVjfy8P'
-        self.ch_database = 'default'
+        self.ch_host = os.getenv("CH_HOST", "127.0.0.1")
+        self.ch_port = int(os.getenv("CH_PORT", "9000"))
+        self.ch_user = os.getenv("CH_USER", "default")
+        self.ch_password = os.getenv("CH_PASSWORD", "aSh49aVjfy8P")
+        self.ch_database = os.getenv("CH_DATABASE", "default")
 
         self.tunnel = None
         self.client = None
@@ -155,10 +156,25 @@ class ClickHouseDB:
                 continue
 
             try:
+                # Handle multiple possible field names for amounts
+                total_amount = (
+                    txn.get('total_debit_amount') or
+                    txn.get('amount') or
+                    txn.get('total_amount') or
+                    0
+                )
+                net_amount = (
+                    txn.get('net_debit_amount') or
+                    txn.get('net_amount_debit') or
+                    txn.get('debit_amount') or
+                    txn.get('amount') or
+                    0
+                )
+
                 data = [(
                     txn.get('status', ''),
-                    float(txn.get('total_debit_amount', 0)),
-                    float(txn.get('net_debit_amount', 0)),
+                    float(total_amount),
+                    float(net_amount),
                     txn.get('easepayid', ''),
                     txn.get('firstname', ''),
                     txn.get('phone', ''),
@@ -249,10 +265,25 @@ class ClickHouseDB:
                 # Handle both 'error_Message' (from API) and 'error_message'
                 error_msg = txn.get('error_message') or txn.get('error_Message', '')
 
+                # Handle multiple possible field names for amounts
+                total_amount = (
+                    txn.get('total_debit_amount') or
+                    txn.get('amount') or
+                    txn.get('total_amount') or
+                    0
+                )
+                net_amount = (
+                    txn.get('net_debit_amount') or
+                    txn.get('net_amount_debit') or
+                    txn.get('debit_amount') or
+                    txn.get('amount') or
+                    0
+                )
+
                 data = [(
                     txn.get('status', ''),
-                    float(txn.get('total_debit_amount', 0)),
-                    float(txn.get('net_debit_amount', 0)),
+                    float(total_amount),
+                    float(net_amount),
                     txn.get('easepayid', ''),
                     txn.get('firstname', ''),
                     txn.get('phone', ''),
@@ -271,6 +302,8 @@ class ClickHouseDB:
                 self.client.execute(insert_query, data)
                 inserted_count += 1
                 print(f"[OK] Inserted transaction {txnid}")
+                print(f"     total_amount: {total_amount}")
+                print(f"     net_amount: {net_amount}")
                 print(f"     addedon: {txn.get('addedon', 'N/A')}")
                 print(f"     error_message: {error_msg or 'N/A'}")
             except Exception as e:
@@ -473,13 +506,15 @@ class EasebuzzAPI:
                 print(f"Response: {e.response.text}")
             return None
 
-    def retrieve_transaction_details(self, txnid, hash_value):
+    def retrieve_transaction_details(self, txnid, hash_value, max_retries=2):
         """
         Retrieve detailed information for a specific transaction.
+        Automatically retries with token refresh on 403 errors.
 
         Args:
             txnid (str): Transaction ID to retrieve
             hash_value (str): Hash value for request authentication
+            max_retries (int): Maximum number of retries on 403 errors (default: 2)
 
         Returns:
             dict: Transaction details if successful, None otherwise
@@ -499,75 +534,116 @@ class EasebuzzAPI:
             "Cookie": "/'; Path=/"
         }
 
-        payload = {
-            "key": self.merchant_key,
-            "txnid": txnid,
-            "hash": hash_value,
-            "additional_data": "transaction_date",
-            "token": self.token
-        }
+        # Retry logic for handling 403 authentication errors
+        for attempt in range(max_retries + 1):
+            payload = {
+                "key": self.merchant_key,
+                "txnid": txnid,
+                "hash": hash_value,
+                "additional_data": "transaction_date",
+                "token": self.token
+            }
 
-        try:
-            print(f"\nMaking API request to: {url}")
-            print(f"Request Payload:\n{json.dumps(payload, indent=2)}")
+            try:
+                if attempt == 0:
+                    print(f"\nMaking API request to: {url}")
+                    print(f"Request Payload:\n{json.dumps(payload, indent=2)}")
+                else:
+                    print(f"\n[RETRY {attempt}/{max_retries}] Retrying with fresh token...")
 
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
+                response = requests.post(url, headers=headers, json=payload)
+                response.raise_for_status()
 
-            data = response.json()
+                data = response.json()
 
-            # Enhanced console output with full details
-            print("\n" + "="*100)
-            print("=" * 100)
-            print(f"{'TRANSACTION DETAILS - FULL RESPONSE':^100}")
-            print("=" * 100)
-            print(f"Transaction ID: {txnid}")
-            print(f"HTTP Status Code: {response.status_code}")
-            print(f"Response Time: {response.elapsed.total_seconds():.2f} seconds")
-            print("-" * 100)
+                # Enhanced console output with full details
+                print("\n" + "="*100)
+                print("=" * 100)
+                print(f"{'TRANSACTION DETAILS - FULL RESPONSE':^100}")
+                print("=" * 100)
+                print(f"Transaction ID: {txnid}")
+                print(f"HTTP Status Code: {response.status_code}")
+                print(f"Response Time: {response.elapsed.total_seconds():.2f} seconds")
+                print("-" * 100)
 
-            # Pretty print the full JSON response
-            print("\nCOMPLETE API RESPONSE:")
-            print("-" * 100)
-            response_str = json.dumps(data, indent=4, ensure_ascii=False)
-            print(response_str)
-            print("-" * 100)
+                # Pretty print the full JSON response
+                print("\nCOMPLETE API RESPONSE:")
+                print("-" * 100)
+                response_str = json.dumps(data, indent=4, ensure_ascii=False)
+                print(response_str)
+                print("-" * 100)
 
-            # If there's transaction data, display it in a structured format
-            if isinstance(data, dict):
-                if data.get('status') == 1 and data.get('data'):
-                    txn_data = data.get('data', {})
-                    print("\nDETAILED TRANSACTION FIELDS:")
-                    print("-" * 100)
-                    for key, value in sorted(txn_data.items()):
-                        print(f"{key:30s} : {value}")
-                    print("-" * 100)
+                # If there's transaction data, display it in a structured format
+                if isinstance(data, dict):
+                    if data.get('status') == 1 and data.get('data'):
+                        txn_data = data.get('data', {})
+                        print("\nDETAILED TRANSACTION FIELDS:")
+                        print("-" * 100)
+                        for key, value in sorted(txn_data.items()):
+                            print(f"{key:30s} : {value}")
+                        print("-" * 100)
 
-                    # Highlight addedon and error_message
-                    print("\n" + "!"*100)
-                    print(f"{'KEY FIELDS FOR DATABASE':^100}")
-                    print("!"*100)
-                    print(f"addedon        : {txn_data.get('addedon', 'NOT FOUND')}")
-                    print(f"error_message  : {txn_data.get('error_message', 'NOT FOUND')}")
-                    print("!"*100)
-                elif data.get('msg'):
-                    print(f"\nAPI Message: {data.get('msg')}")
-                    print("-" * 100)
+                        # Highlight addedon and error_message
+                        print("\n" + "!"*100)
+                        print(f"{'KEY FIELDS FOR DATABASE':^100}")
+                        print("!"*100)
+                        print(f"addedon        : {txn_data.get('addedon', 'NOT FOUND')}")
+                        print(f"error_message  : {txn_data.get('error_message', 'NOT FOUND')}")
+                        print("!"*100)
+                    elif data.get('msg'):
+                        print(f"\nAPI Message: {data.get('msg')}")
+                        print("-" * 100)
 
-            print("=" * 100)
-            print("\n")
+                print("=" * 100)
+                print("\n")
 
-            return data
+                return data
 
-        except requests.exceptions.RequestException as e:
-            print("\n" + "="*80)
-            print(f"ERROR retrieving transaction details for {txnid}")
-            print(f"Error: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"Status Code: {e.response.status_code}")
-                print(f"Response: {e.response.text}")
-            print("="*80 + "\n")
-            return None
+            except requests.exceptions.HTTPError as e:
+                # Handle 403 Forbidden errors with token refresh and retry
+                if hasattr(e, 'response') and e.response is not None and e.response.status_code == 403:
+                    print("\n" + "!"*80)
+                    print(f"⚠️  403 FORBIDDEN ERROR - Authentication failed for {txnid}")
+                    print(f"Response: {e.response.text}")
+
+                    if attempt < max_retries:
+                        print(f"🔄 Refreshing authentication token and retrying (attempt {attempt + 1}/{max_retries})...")
+                        print("!"*80 + "\n")
+
+                        # Force token refresh
+                        if not self.get_auth_token(force_refresh=True):
+                            print("Failed to refresh authentication token.")
+                            return None
+
+                        # Continue to next retry attempt
+                        continue
+                    else:
+                        print(f"❌ Max retries ({max_retries}) reached. Giving up on transaction {txnid}")
+                        print("!"*80 + "\n")
+                        return None
+                else:
+                    # Other HTTP errors - don't retry
+                    print("\n" + "="*80)
+                    print(f"ERROR retrieving transaction details for {txnid}")
+                    print(f"Error: {e}")
+                    print(f"Status Code: {e.response.status_code}")
+                    print(f"Response: {e.response.text}")
+                    print("="*80 + "\n")
+                    return None
+
+            except requests.exceptions.RequestException as e:
+                # Network or other errors - don't retry
+                print("\n" + "="*80)
+                print(f"ERROR retrieving transaction details for {txnid}")
+                print(f"Error: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    print(f"Status Code: {e.response.status_code}")
+                    print(f"Response: {e.response.text}")
+                print("="*80 + "\n")
+                return None
+
+        # Should never reach here, but just in case
+        return None
 
     def get_all_transactions(self, start_date, end_date, hash_value, show_page_tables=True, db_handler=None):
         """
@@ -646,34 +722,29 @@ class EasebuzzAPI:
 
         return all_transactions
 
-    def get_and_retrieve_transaction_details(self, start_date, end_date, hash_value, limit=None, db_handler=None):
+    def get_and_retrieve_transaction_details(self, start_date, end_date, hash_value, limit=None):
         """
         Fetch transactions by date and retrieve detailed information for each transaction.
-        Now supports pagination to fetch ALL transactions with automatic token refresh.
+        Handles pagination automatically to fetch ALL transactions.
 
         Args:
             start_date (str): Start date in format "DD-MM-YYYY"
             end_date (str): End date in format "DD-MM-YYYY"
             hash_value (str): Hash value for request authentication
             limit (int, optional): Limit number of transactions to retrieve details for
-            db_handler: ClickHouseDB instance to push data in batches (optional)
 
         Returns:
             list: List of detailed transaction data
         """
-        print("\n=== Step 1: Fetching ALL transactions by date with pagination ===")
+        print("\n=== Step 1: Fetching ALL transactions by date (with pagination) ===")
 
+        # Get ALL transactions from date API with pagination
         all_transactions = []
         page_token = None
         page_number = 1
 
-        # Fetch all pages
         while True:
-            print(f"\n{'='*80}")
-            print(f"--- Fetching transaction list page {page_number} ---")
-            print(f"{'='*80}")
-
-            # Get transactions from date API
+            print(f"\nFetching page {page_number}...")
             result = self.get_transactions_by_date(
                 start_date=start_date,
                 end_date=end_date,
@@ -682,21 +753,19 @@ class EasebuzzAPI:
             )
 
             if not result or not result.get('status'):
-                print("Failed to fetch transactions")
+                print("Failed to fetch transactions or no more data")
                 break
 
             transactions = result.get('data', [])
             all_transactions.extend(transactions)
-            print(f"Retrieved {len(transactions)} transactions from page {page_number}")
-            print(f"Total transactions so far: {len(all_transactions)}")
+            print(f"Retrieved {len(transactions)} transactions from page {page_number} (Total so far: {len(all_transactions)})")
 
             # Check if there's a next page
             next_token = result.get('next')
             if not next_token:
-                print(f"\nNo more pages. Total transactions found: {len(all_transactions)}")
+                print(f"\nNo more pages. Total transactions fetched: {len(all_transactions)}")
                 break
 
-            # Use the next token for the next iteration
             page_token = next_token
             page_number += 1
 
@@ -704,39 +773,26 @@ class EasebuzzAPI:
             print("No transactions found")
             return []
 
-        # Apply limit if specified
-        transactions_to_process = all_transactions
-        if limit:
-            transactions_to_process = all_transactions[:limit]
-            print(f"\nLimiting to first {limit} transactions out of {len(all_transactions)} total")
+        print(f"\n✓ Successfully fetched {len(all_transactions)} total transactions across {page_number} pages")
 
-        print(f"\n{'='*100}")
-        print(f"=== Step 2: Retrieving detailed information for {len(transactions_to_process)} transactions ===")
-        print(f"{'='*100}")
+        # Apply limit if specified
+        transactions = all_transactions
+        if limit:
+            transactions = all_transactions[:limit]
+            print(f"Limiting to first {limit} transactions")
+
+        print("\n=== Step 2: Retrieving detailed information for each transaction ===")
 
         detailed_transactions = []
-        batch_size = 50  # Insert to DB every 50 transactions
 
-        for idx, txn in enumerate(transactions_to_process, 1):
+        for idx, txn in enumerate(transactions, 1):
             txnid = txn.get('txnid')
             if not txnid:
-                print(f"[{idx}/{len(transactions_to_process)}] Skipping - No txnid found")
+                print(f"[{idx}/{len(transactions)}] Skipping - No txnid found")
                 continue
-
-            # Skip if already in database
-            if db_handler and db_handler.transaction_exists(txnid):
-                print(f"[{idx}/{len(transactions_to_process)}] Skipping - Already in database: {txnid}")
-                continue
-
-            # Refresh token every 100 transactions or if expired
-            if idx % 100 == 0 or self.is_token_expired():
-                print(f"\n[Token Refresh] Refreshing authentication token...")
-                if not self.get_auth_token(force_refresh=True):
-                    print(f"[ERROR] Failed to refresh token at transaction {idx}")
-                    break
 
             print(f"\n{'*'*80}")
-            print(f"[{idx}/{len(transactions_to_process)}] Fetching details for txnid: {txnid}")
+            print(f"[{idx}/{len(transactions)}] Fetching details for txnid: {txnid}")
             print(f"{'*'*80}")
 
             # Retrieve detailed transaction information
@@ -744,30 +800,17 @@ class EasebuzzAPI:
 
             if details:
                 detailed_transactions.append(details)
-                print(f"[OK] Successfully retrieved details for transaction {idx}/{len(transactions_to_process)}")
-
-                # Insert in batches if db_handler provided
-                if db_handler and len(detailed_transactions) >= batch_size:
-                    print(f"\n[Batch Insert] Inserting {len(detailed_transactions)} transactions to database...")
-                    inserted = db_handler.insert_detailed_transactions(detailed_transactions)
-                    print(f"[Batch Insert] Successfully inserted {inserted} transactions")
-                    detailed_transactions = []  # Clear batch
+                print(f"[OK] Successfully retrieved details for transaction {idx}/{len(transactions)}")
             else:
-                print(f"[FAIL] Failed to retrieve details for transaction {idx}/{len(transactions_to_process)}")
-
-        # Insert any remaining transactions in final batch
-        if db_handler and len(detailed_transactions) > 0:
-            print(f"\n[Final Batch Insert] Inserting remaining {len(detailed_transactions)} transactions to database...")
-            inserted = db_handler.insert_detailed_transactions(detailed_transactions)
-            print(f"[Final Batch Insert] Successfully inserted {inserted} transactions")
+                print(f"[FAIL] Failed to retrieve details for transaction {idx}/{len(transactions)}")
 
         print(f"\n{'='*100}")
         print(f"{'='*100}")
         print(f"{'FINAL SUMMARY':^100}")
         print(f"{'='*100}")
-        print(f"Total transactions found across all pages: {len(all_transactions)}")
-        print(f"Transactions processed for details: {len(transactions_to_process)}")
-        print(f"Successfully retrieved details: {len(detailed_transactions) if not db_handler else 'Inserted in batches'}")
+        print(f"Total transactions found: {len(transactions)}")
+        print(f"Successfully retrieved details: {len(detailed_transactions)}")
+        print(f"Failed: {len(transactions) - len(detailed_transactions)}")
         print(f"{'='*100}\n")
 
         # Display consolidated view of all retrieved transactions
@@ -814,56 +857,61 @@ def main():
             # Step 3: Retrieve transactions
             hash_value = "b80cdee1da064dc20f50d4fd87b70a2d81bf4cb3fc6945fa50072498d77dae75e7158bcdbad619e03fa8f524fa4ddcf742a54b61a6798fb9fa3dc43fd99bcf94"
 
-            # Get the last transaction date from database to know where to start fetching
-            print("\n=== Checking last transaction in database ===")
-            last_txn_result = db.client.execute("SELECT MAX(addedon) FROM test_payment_transactions")
-            last_txn_date = last_txn_result[0][0] if last_txn_result[0][0] else None
-
-            if last_txn_date:
-                # Parse the last transaction date and use it as start date
-                from datetime import datetime as dt
-                last_date_obj = dt.strptime(last_txn_date, "%Y-%m-%d %H:%M:%S")
-                start_date = last_date_obj.strftime("%d-%m-%Y")
-                print(f"Last transaction in DB: {last_txn_date}")
-                print(f"Will fetch from: {start_date}")
-            else:
-                # No data in DB, start from today
-                start_date = datetime.now().strftime("%d-%m-%Y")
-                print(f"No transactions in DB yet. Starting from: {start_date}")
-
-            # Always use today as end date to get latest data
+            # Calculate date range: from 01-09-2025 to today
+            start_date = "01-09-2025"
             end_date = datetime.now().strftime("%d-%m-%Y")
-            print(f"Fetching up to: {end_date} (current date)")
+
+            print(f"\n=== Fetching transactions from {start_date} to {end_date} ===")
 
             # OPTION 1: Fetch transaction details dynamically from date API
-            print("\n=== Fetching all available transactions with auto token refresh ===")
+            print("\n=== NEW FEATURE: Fetching transaction details dynamically ===")
             detailed_transactions = easebuzz.get_and_retrieve_transaction_details(
                 start_date=start_date,
                 end_date=end_date,
-                hash_value=hash_value,
-                limit=None,  # Fetch all transactions
-                db_handler=db  # Pass database handler for batch insertion and duplicate checking
+                hash_value=hash_value
+                # No limit - fetch all transactions
             )
 
-            print(f"\n{'#'*100}")
-            print(f"{'SUCCESS':^100}")
-            print(f"{'#'*100}")
-            print(f"[OK] Completed processing transactions from {start_date} to {end_date}")
-            print(f"[OK] All transactions inserted in batches directly to database")
+            if detailed_transactions:
+                print(f"\n{'#'*100}")
+                print(f"{'SUCCESS':^100}")
+                print(f"{'#'*100}")
+                print(f"[OK] Retrieved detailed information for {len(detailed_transactions)} transactions")
 
-            # Get updated total count from database
-            total_in_db = db.get_transaction_count()
-            print(f"[OK] Total transactions in database: {total_in_db}")
+                # Save detailed transactions to JSON
+                output_file = 'detailed_transactions.json'
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(detailed_transactions, f, indent=4, ensure_ascii=False)
 
-            # Display recent transactions with addedon and error_message
-            print(f"\n=== Verifying Saved Data (Last 20 transactions) ===")
-            db.get_transactions_with_details(limit=20)
+                print(f"[OK] Detailed transactions saved to '{output_file}'")
 
-            print(f"\nData successfully saved to:")
-            print(f"  1. ClickHouse database table: test_payment_transactions")
-            print(f"     Fields saved: addedon, error_message (along with all other fields)")
-            print(f"  2. Verification table above showing addedon & error_message values")
-            print(f"{'#'*100}\n")
+                # Insert detailed transactions into database
+                print(f"\n=== Inserting detailed transactions into ClickHouse ===")
+                inserted_count = db.insert_detailed_transactions(detailed_transactions)
+                print(f"[OK] Inserted {inserted_count} detailed transactions into database")
+
+                # Get updated total count from database
+                total_in_db = db.get_transaction_count()
+                print(f"[OK] Total transactions in database: {total_in_db}")
+
+                # Display the inserted transactions with addedon and error_message
+                print(f"\n=== Verifying Saved Data ===")
+                db.get_transactions_with_details(limit=inserted_count)
+
+                print(f"\nYou can view the full records in:")
+                print(f"  1. Console output above (search for 'TRANSACTION DETAILS - FULL RESPONSE')")
+                print(f"  2. File: {output_file}")
+                print(f"  3. ClickHouse database table: test_payment_transactions")
+                print(f"     Fields saved: addedon, error_message (along with all other fields)")
+                print(f"  4. Verification table above showing addedon & error_message values")
+                print(f"{'#'*100}\n")
+            else:
+                print(f"\n{'!'*100}")
+                print(f"{'WARNING':^100}")
+                print(f"{'!'*100}")
+                print("No detailed transactions were retrieved.")
+                print("Check the console output above for any errors.")
+                print(f"{'!'*100}\n")
 
             # print("\n" + "="*80)
 
