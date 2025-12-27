@@ -1,0 +1,217 @@
+Subject: Easebuzz ClickHouse Docker Image - Setup Instructions
+
+Hi,
+
+I'm sharing the Docker image for the Easebuzz ClickHouse transaction sync application. Follow the instructions below to run it on your PC.
+
+================================================================================
+DOCKER IMAGE DETAILS
+================================================================================
+
+Docker Hub Repository: tripuradange15/easebuzz-clickhouse:latest
+Image Digest: sha256:fc745e36fcf91a85cc0dcaaee0f3d9b8c0c89ac2bede4d34e91d94f824b8e3a5
+
+================================================================================
+PREREQUISITES
+================================================================================
+
+1. Docker Desktop installed and running on Windows
+   Download from: https://www.docker.com/products/docker-desktop
+
+2. SSH Private Key File (.pem)
+   You need the SML_Castlecraft.pem file to connect to the ClickHouse server
+
+3. Network Access
+   Your PC must be able to reach 3.7.169.181:22 (SSH server)
+
+================================================================================
+SETUP INSTRUCTIONS
+================================================================================
+
+Step 1: Verify Network Connectivity
+-----------------------------------
+Before running the container, test if your PC can reach the SSH server:
+
+PowerShell:
+    Test-NetConnection -ComputerName 3.7.169.181 -Port 22
+
+Expected output: TcpTestSucceeded : True
+
+If the connection fails:
+- Connect to your company VPN
+- Contact your network admin to whitelist your IP address
+- Check your firewall settings
+
+Step 2: Prepare the SSH Key File
+-----------------------------------
+1. Save the SML_Castlecraft.pem file to a folder on your PC
+   Example: C:\easebuzz-keys\SML_Castlecraft.pem
+
+2. IMPORTANT: Make sure you save it as a FILE, not a folder
+   - Right-click the file in Windows Explorer
+   - Check that "Type" shows "PEM File" or similar, NOT "File folder"
+
+Step 3: Pull the Docker Image
+-----------------------------------
+Open PowerShell or Command Prompt and run:
+
+    docker pull tripuradange15/easebuzz-clickhouse:latest
+
+This will download the image from Docker Hub (~482MB).
+
+Step 4: Verify the Image
+-----------------------------------
+Check that you have the correct image:
+
+    docker images tripuradange15/easebuzz-clickhouse:latest
+
+You should see:
+    IMAGE ID: fc745e36fcf9
+
+Step 5: Run the Container
+-----------------------------------
+IMPORTANT: Replace C:\easebuzz-keys\SML_Castlecraft.pem with YOUR actual .pem file path!
+
+In PowerShell or CMD (NOT Git Bash):
+
+docker run --rm ^
+  -e SSH_HOST=3.7.169.181 ^
+  -e SSH_PORT=22 ^
+  -e SSH_USER=ubuntu ^
+  -e SSH_KEY_PATH=/keys/SML_Castlecraft.pem ^
+  -v "C:\easebuzz-keys\SML_Castlecraft.pem:/keys/SML_Castlecraft.pem:ro" ^
+  tripuradange15/easebuzz-clickhouse:latest
+
+Note: The ^ character is the line continuation character in Windows CMD/PowerShell
+
+================================================================================
+WHAT THE CONTAINER DOES
+================================================================================
+
+The container performs a ONE-TIME synchronization:
+
+1. Connects to the ClickHouse database via SSH tunnel
+2. Authenticates with the Easebuzz API
+3. Fetches all transactions from the last sync date to today
+4. Inserts new transactions into the ClickHouse database
+5. Skips transactions that already exist in the database
+6. Exits when the sync is complete
+
+To run it again (e.g., for the next day), simply execute the docker run command again.
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Error: "Is a directory: '/keys/SML_Castlecraft.pem'"
+---------------------------------------------------
+Problem: You're mounting a folder instead of the .pem file
+Solution:
+  1. Find the actual .pem FILE on your PC:
+     dir C:\easebuzz-keys\ /s
+
+  2. Update the -v parameter with the correct file path:
+     -v "C:\path\to\actual\file.pem:/keys/SML_Castlecraft.pem:ro"
+
+Error: "Connection refused" or "Network is unreachable"
+-------------------------------------------------------
+Problem: Cannot reach the SSH server at 3.7.169.181:22
+Solution:
+  1. Test connectivity: Test-NetConnection -ComputerName 3.7.169.181 -Port 22
+  2. Connect to VPN if required
+  3. Contact network admin to whitelist your IP address
+
+Error: "Permission denied (publickey)"
+--------------------------------------
+Problem: SSH key authentication failed
+Solution:
+  1. Verify you have the correct .pem file
+  2. Make sure the file is not corrupted
+  3. Contact the person who provided the key
+
+Error: "No such file or directory"
+----------------------------------
+Problem: The .pem file path is incorrect
+Solution:
+  1. Verify the file exists at the path you specified
+  2. Use the full absolute path (e.g., C:\easebuzz-keys\SML_Castlecraft.pem)
+  3. Make sure there are no typos in the path
+
+================================================================================
+ENVIRONMENT VARIABLES (OPTIONAL)
+================================================================================
+
+You can customize the configuration by changing environment variables:
+
+SSH Configuration:
+  -e SSH_HOST=3.7.169.181          # SSH server hostname/IP
+  -e SSH_PORT=22                    # SSH server port
+  -e SSH_USER=ubuntu                # SSH username
+  -e SSH_KEY_PATH=/keys/SML_Castlecraft.pem  # Path inside container
+
+ClickHouse Configuration:
+  -e CH_HOST=127.0.0.1              # ClickHouse host (via SSH tunnel)
+  -e CH_PORT=9000                   # ClickHouse port
+  -e CH_USER=default                # ClickHouse username
+  -e CH_PASSWORD=aSh49aVjfy8P       # ClickHouse password
+  -e CH_DATABASE=default            # ClickHouse database name
+
+Note: You typically don't need to change these unless you have a different setup.
+
+================================================================================
+DOCKER IMAGE SOURCE CODE
+================================================================================
+
+The Docker image contains:
+- Python 3.10
+- Required dependencies (requests, sshtunnel, clickhouse-driver, etc.)
+- Application code (app.py)
+- Entrypoint script that sets SSH key permissions
+
+The image is built from the code in the easebuzz-clickhouse-docker folder.
+
+================================================================================
+RUNNING ON A SCHEDULE
+================================================================================
+
+To run this automatically every day, you can:
+
+Option 1: Windows Task Scheduler
+---------------------------------
+Create a scheduled task that runs the docker run command daily.
+
+Option 2: Docker with Restart Policy
+-------------------------------------
+Not recommended for this use case since the container is designed to run once and exit.
+
+Option 3: Custom Batch Script
+------------------------------
+Create a .bat file with the docker run command and schedule it.
+
+================================================================================
+SUPPORT
+================================================================================
+
+If you encounter any issues:
+
+1. Check the troubleshooting section above
+2. Verify your network connectivity to 3.7.169.181:22
+3. Make sure you're using the correct .pem file path
+4. Check that Docker Desktop is running
+5. Try pulling the latest image again
+
+For technical support, contact: [Your contact information]
+
+================================================================================
+IMPORTANT NOTES
+================================================================================
+
+1. Keep the .pem file SECURE - it provides access to the ClickHouse server
+2. Do NOT share the .pem file publicly or commit it to version control
+3. Make sure to run this on a trusted network
+4. The container runs with read-only access to the .pem file
+5. All transaction data is synced to the ClickHouse database
+
+================================================================================
+
+Thank you!

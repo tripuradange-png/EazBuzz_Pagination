@@ -1,0 +1,74 @@
+Subject: Easebuzz ClickHouse Docker Image - Ready to Use
+
+Hi Team,
+
+I've created a Docker image that syncs Easebuzz payment transactions to our ClickHouse database. The image is ready to use and available on Docker Hub.
+
+================================================================================
+DOCKER IMAGE
+================================================================================
+
+Repository: tripuradange15/easebuzz-clickhouse:latest
+
+Pull command:
+    docker pull tripuradange15/easebuzz-clickhouse:latest
+
+================================================================================
+WHAT IT DOES
+================================================================================
+
+This application automatically syncs payment transactions from Easebuzz API to the ClickHouse database:
+- Connects securely via SSH tunnel to the ClickHouse server
+- Fetches all new transactions since the last sync
+- Inserts them into the test_payment_transactions table
+- Skips duplicates automatically
+- Runs once and exits (designed for scheduled execution)
+
+================================================================================
+HOW TO RUN
+================================================================================
+
+Prerequisites:
+1. Docker Desktop installed
+2. SSH private key file (SML_Castlecraft.pem)
+3. Network access to 3.7.169.181:22
+
+Run command (replace the .pem file path with your actual path):
+
+docker run --rm ^
+  -e SSH_HOST=3.7.169.181 ^
+  -e SSH_PORT=22 ^
+  -e SSH_USER=ubuntu ^
+  -e SSH_KEY_PATH=/keys/SML_Castlecraft.pem ^
+  -v "C:\path\to\your\SML_Castlecraft.pem:/keys/SML_Castlecraft.pem:ro" ^
+  tripuradange15/easebuzz-clickhouse:latest
+
+IMPORTANT: Make sure the .pem file path points to an actual FILE, not a folder.
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+If you get "Connection refused" error:
+    Test-NetConnection -ComputerName 3.7.169.181 -Port 22
+    (You may need to connect to VPN first)
+
+If you get "Is a directory" error:
+    The .pem path is pointing to a folder. Find the actual .pem FILE and update the path.
+
+================================================================================
+DOCUMENTATION
+================================================================================
+
+For detailed setup instructions, troubleshooting, and configuration options, see:
+- SETUP_EMAIL.txt (comprehensive guide)
+- QUICK_START.md (5-step quick start)
+- TROUBLESHOOTING.md (network issues)
+
+All files are in the easebuzz-clickhouse-docker folder.
+
+================================================================================
+
+Let me know if you have any questions or need help setting it up.
+
+Best regards

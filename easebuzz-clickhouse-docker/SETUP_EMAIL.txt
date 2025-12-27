@@ -1,0 +1,215 @@
+Subject: Easebuzz ClickHouse Docker Container - Setup Instructions
+
+Hi,
+
+I'm sharing the setup instructions for the Easebuzz ClickHouse data sync tool. This Docker container fetches transaction data from Easebuzz API and stores it in ClickHouse database via SSH tunnel.
+
+=================================================================================
+PREREQUISITES
+=================================================================================
+
+1. Install Docker Desktop
+   Download: https://www.docker.com/products/docker-desktop/
+   Make sure Docker is running before executing any commands
+
+2. You'll need the SSH private key file: SML_Castlecraft.pem
+   (I'll share this separately via secure channel)
+
+=================================================================================
+QUICK START (RECOMMENDED METHOD)
+=================================================================================
+
+This is the easiest way - no project files needed, just pull and run:
+
+Step 1: Create a folder for the SSH key
+--------
+mkdir C:\easebuzz-keys
+
+Step 2: Copy the .pem file to that folder
+--------
+copy "path\to\SML_Castlecraft.pem" "C:\easebuzz-keys\SML_Castlecraft.pem"
+
+Step 3: Pull the Docker image
+--------
+docker pull tripuradange15/easebuzz-clickhouse:latest
+
+Step 4: Run the container
+--------
+docker run --rm ^
+  -e SSH_HOST=3.7.169.181 ^
+  -e SSH_PORT=22 ^
+  -e SSH_USER=ubuntu ^
+  -e SSH_KEY_PATH=/keys/SML_Castlecraft.pem ^
+  -e FETCH_INTERVAL=30 ^
+  -v "C:\easebuzz-keys\SML_Castlecraft.pem:/keys/SML_Castlecraft.pem:ro" ^
+  tripuradange15/easebuzz-clickhouse:latest
+
+IMPORTANT:
+- If you store the .pem file in a different location, change the path in the -v parameter
+- FETCH_INTERVAL=30 means it checks for new transactions every 30 seconds
+- You can change this value: 10=every 10s, 60=every 1 min, etc.
+
+=================================================================================
+WHAT THE CONTAINER DOES
+=================================================================================
+
+When you run the container, it will:
+1. Establish SSH tunnel to the ClickHouse server (3.7.169.181)
+2. Connect to ClickHouse database
+3. Authenticate with Easebuzz API
+4. Fetch all new transactions since the last run
+5. Store transaction data in ClickHouse database (skips duplicates)
+6. Exit automatically when complete
+
+The container performs a one-time sync of all new transactions.
+Run it whenever you want to fetch the latest data (manually or via scheduler).
+
+=================================================================================
+DOCKER HUB IMAGE
+=================================================================================
+
+Image Name: tripuradange15/easebuzz-clickhouse:latest
+Docker Hub: https://hub.docker.com/r/tripuradange15/easebuzz-clickhouse
+
+The image is publicly available and can be pulled from any machine with Docker.
+
+=================================================================================
+USEFUL COMMANDS
+=================================================================================
+
+View running containers:
+docker ps
+
+View all containers (including stopped):
+docker ps -a
+
+View container logs (if running in background):
+docker logs -f easebuzz_clickhouse
+
+Stop a running container:
+docker stop easebuzz_clickhouse
+
+Remove downloaded image:
+docker rmi tripuradange15/easebuzz-clickhouse:latest
+
+Pull latest version:
+docker pull tripuradange15/easebuzz-clickhouse:latest
+
+=================================================================================
+ENVIRONMENT VARIABLES (OPTIONAL CUSTOMIZATION)
+=================================================================================
+
+You can customize the connection settings by adding more -e flags:
+
+docker run --rm ^
+  -e SSH_HOST=3.7.169.181 ^
+  -e SSH_PORT=22 ^
+  -e SSH_USER=ubuntu ^
+  -e SSH_KEY_PATH=/keys/SML_Castlecraft.pem ^
+  -e CH_HOST=127.0.0.1 ^
+  -e CH_PORT=9000 ^
+  -e CH_USER=default ^
+  -e CH_PASSWORD=aSh49aVjfy8P ^
+  -e CH_DATABASE=default ^
+  -e FETCH_INTERVAL=30 ^
+  -v "C:\easebuzz-keys\SML_Castlecraft.pem:/keys/SML_Castlecraft.pem:ro" ^
+  tripuradange15/easebuzz-clickhouse:latest
+
+FETCH_INTERVAL options:
+- 10 = Check every 10 seconds (very frequent, near real-time)
+- 30 = Check every 30 seconds (recommended, good balance)
+- 60 = Check every 60 seconds (1 minute)
+- 300 = Check every 5 minutes (less frequent)
+
+=================================================================================
+ALTERNATIVE METHOD: USING PROJECT FILES
+=================================================================================
+
+If you prefer to have the source code and build locally:
+
+1. Copy the entire "easebuzz-clickhouse-docker" folder to your PC
+2. Place the SML_Castlecraft.pem file in the "keys" subfolder
+3. Open Command Prompt and navigate to the project folder
+4. Run: docker-compose build
+5. Run: docker-compose up
+
+To run in background: docker-compose up -d
+To view logs: docker logs -f easebuzz_clickhouse
+To stop: docker-compose down
+
+=================================================================================
+TROUBLESHOOTING
+=================================================================================
+
+CRITICAL: Before running the container, verify network connectivity!
+
+Step 1: Test if your PC can reach the SSH server
+---------
+PowerShell:
+Test-NetConnection -ComputerName 3.7.169.181 -Port 22
+
+Expected: TcpTestSucceeded : True
+
+If this fails, the Docker container will also fail. Common solutions:
+1. Connect to VPN if required
+2. Ask your network admin to whitelist your IP address
+3. Run the container on a PC that has network access
+
+Step 2: Common Issues
+---------
+Issue: "Cannot connect to the Docker daemon"
+Solution: Make sure Docker Desktop is running
+
+Issue: "Connection refused" to 3.7.169.181:22
+Solution:
+  1. Test connectivity from Windows (see Step 1 above)
+  2. Connect to VPN if required
+  3. Whitelist your public IP with server admin
+  4. See TROUBLESHOOTING.md file for detailed solutions
+
+Issue: "No such file or directory" for .pem file
+Solution: Check that the path to your .pem file is correct and use full paths
+
+Issue: Container exits immediately
+Solution: Check logs with "docker logs easebuzz_clickhouse" to see the error
+
+Issue: "Permission denied" for SSH key
+Solution: The container automatically sets permissions - shouldn't occur
+
+For detailed troubleshooting, see the TROUBLESHOOTING.md file included in the
+project folder.
+
+=================================================================================
+SECURITY NOTES
+=================================================================================
+
+- The SSH key is mounted read-only (:ro flag) for security
+- Permissions are automatically set to 600 inside the container
+- Never commit the .pem file to version control
+- Keep the SSH private key secure and share only via secure channels
+
+=================================================================================
+TECHNICAL DETAILS
+=================================================================================
+
+What's inside the container:
+- Base Image: Python 3.10 Slim
+- Python Libraries: requests, tabulate, sshtunnel, clickhouse-driver
+- System Packages: gcc, openssh-client
+- Application: Automated Easebuzz transaction sync script
+
+The container:
+- Fetches transactions with automatic pagination
+- Handles token expiration and refresh
+- Skips duplicate transactions
+- Supports detailed transaction retrieval
+- Automatically closes connections on completion
+
+=================================================================================
+
+If you have any questions or encounter issues, please let me know.
+
+The complete project documentation is available in the README.md file in the
+easebuzz-clickhouse-docker folder.
+
+Best regards

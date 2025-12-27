@@ -1,0 +1,127 @@
+================================================================================
+EASEBUZZ CLICKHOUSE DOCKER - PRE-FLIGHT CHECKLIST
+================================================================================
+
+Before running the Docker container, complete ALL these checks:
+
+[ ] Step 1: Docker Desktop Installed
+    Download from: https://www.docker.com/products/docker-desktop/
+    Verify: Run "docker --version" in Command Prompt
+
+[ ] Step 2: SSH Private Key Available
+    File: SML_Castlecraft.pem
+    Location: C:\easebuzz-keys\SML_Castlecraft.pem
+    Verify: Run "dir C:\easebuzz-keys\SML_Castlecraft.pem"
+
+[ ] Step 3: Network Connectivity Test
+    *** CRITICAL - THIS MUST PASS ***
+
+    Open PowerShell and run:
+    Test-NetConnection -ComputerName 3.7.169.181 -Port 22
+
+    Expected Result:
+    TcpTestSucceeded : True
+
+    If FAILED:
+    [ ] Connected to company VPN
+    [ ] Requested IP whitelist from IT (provide your public IP)
+    [ ] Verified firewall settings allow outbound port 22
+
+[ ] Step 4: Pull Docker Image
+    Command:
+    docker pull tripuradange15/easebuzz-clickhouse:latest
+
+    Expected: Download completes successfully
+
+================================================================================
+DIAGNOSTICS
+================================================================================
+
+If Step 3 fails, collect this information:
+
+1. Your Public IP Address:
+   PowerShell:
+   (Invoke-WebRequest -Uri "https://api.ipify.org").Content
+
+   Result: _________________________
+
+2. Network Test Result:
+   PowerShell:
+   Test-NetConnection -ComputerName 3.7.169.181 -Port 22
+
+   TcpTestSucceeded: [ ] True  [ ] False
+
+3. VPN Status:
+   [ ] Connected to VPN
+   [ ] Not connected to VPN
+   [ ] No VPN required
+
+4. Firewall Status:
+   [ ] Corporate firewall active
+   [ ] Windows Firewall only
+   [ ] Firewall disabled (not recommended)
+
+================================================================================
+READY TO RUN?
+================================================================================
+
+If ALL checks above are PASSED (especially Step 3), run:
+
+docker run --rm ^
+  -e SSH_HOST=3.7.169.181 ^
+  -e SSH_PORT=22 ^
+  -e SSH_USER=ubuntu ^
+  -e SSH_KEY_PATH=/keys/SML_Castlecraft.pem ^
+  -e FETCH_INTERVAL=30 ^
+  -v "C:\easebuzz-keys\SML_Castlecraft.pem:/keys/SML_Castlecraft.pem:ro" ^
+  tripuradange15/easebuzz-clickhouse:latest
+
+Note: Run from Command Prompt (cmd), not PowerShell or Git Bash
+
+================================================================================
+EXPECTED OUTPUT WHEN WORKING
+================================================================================
+
+You should see:
+
+Starting SSH tunnel...
+SSH Tunnel established: ('127.0.0.1', 9000)
+Connecting to ClickHouse database...
+Connected to ClickHouse! Version: 25.6.4.12
+Fetching authentication token...
+Token fetched successfully
+Fetching transactions from API...
+Found X transactions from API
+
+The container will continuously check for new transactions every 30 seconds.
+
+================================================================================
+IF ERRORS OCCUR
+================================================================================
+
+Error: "Connection refused to 3.7.169.181:22"
+→ Step 3 network test failed
+→ Connect to VPN or get IP whitelisted
+
+Error: "No such file or directory: .pem"
+→ SSH key not in correct location
+→ Verify: dir C:\easebuzz-keys\SML_Castlecraft.pem
+
+Error: "Cannot connect to Docker daemon"
+→ Docker Desktop not running
+→ Start Docker Desktop and wait until it's ready
+
+Error: "Permission denied (publickey)"
+→ Wrong SSH key or corrupted file
+→ Re-download the SSH key
+
+================================================================================
+NEED HELP?
+================================================================================
+
+1. Check QUICK_START.md for quick setup guide
+2. Check SETUP_EMAIL.txt for complete instructions
+3. Check TROUBLESHOOTING.md for detailed solutions
+4. Contact IT if network connectivity fails
+
+================================================================================
