@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   easebuzz_clickhouse:
     build: .
@@ -17,6 +15,9 @@ services:
       - CH_USER=default
       - CH_PASSWORD=aSh49aVjfy8P
       - CH_DATABASE=default
+
+      # Fetch Configuration
+      - FETCH_INTERVAL=30
     volumes:
-      - ./keys:/keys:ro
+      - ./keys/SML_Castlecraft.pem:/keys/SML_Castlecraft.pem:ro
     restart: "no"  # Changed from unless-stopped to "no" for manual/scheduled runs

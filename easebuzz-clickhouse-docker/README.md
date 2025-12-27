@@ -1,6 +1,16 @@
-# Easebuzz ClickHouse Docker Setup
+# Easebuzz ClickHouse Sync Service - Docker
 
-This is a production-ready Docker containerized setup for the Easebuzz transaction fetcher script that connects to a remote ClickHouse database via SSH tunnel.
+This is a production-ready Docker containerized setup for the Easebuzz transaction sync service. It connects to Easebuzz API and syncs transactions to ClickHouse database via SSH tunnel.
+
+## ✨ Latest Updates
+
+- ✅ Updated to latest version with all bug fixes
+- ✅ Auto-pagination for fetching ALL transactions
+- ✅ Intermediate status update handling (pending → success/failure)
+- ✅ Token auto-refresh mechanism
+- ✅ Batch insertion (50 transactions per batch)
+- ✅ Duplicate detection and smart update logic
+- ✅ Continuous sync mode with configurable intervals
 
 ## Project Structure
 
@@ -68,32 +78,46 @@ docker-compose build
 - Copies your application code
 - Sets up SSH key with correct permissions
 
-### Run the Container (Foreground)
-
-This runs the container in the foreground and shows all output in your terminal.
+### Run Single Sync (One-time run)
 
 ```cmd
-docker-compose up
+docker-compose run --rm easebuzz_clickhouse
 ```
 
 **What this does:**
-- Starts the container
-- Runs `app.py` inside the container
-- Shows all console output in real-time
-- Press `Ctrl+C` to stop
+- Runs a single sync operation
+- Fetches all missing transactions from Easebuzz
+- Inserts them into ClickHouse
+- Exits when complete
 
-### Run the Container (Background/Detached Mode)
-
-This runs the container in the background.
+### Run Continuous Sync Mode (Recommended for Production)
 
 ```cmd
-docker-compose up -d
+docker-compose run --rm easebuzz_clickhouse python app.py --continuous
 ```
 
 **What this does:**
-- Starts the container in the background
-- Runs `app.py` inside the container
-- Returns control to your terminal immediately
+- Syncs transactions every 5 minutes (default)
+- Updates intermediate statuses every 2 hours
+- Runs indefinitely until stopped with Ctrl+C
+- Auto-refreshes API tokens
+
+### Run Continuous Sync with Custom Intervals
+
+```cmd
+# Sync every 10 minutes, status update every 120 minutes
+docker-compose run --rm easebuzz_clickhouse python app.py --continuous 10 120
+```
+
+### Run Status Update Only
+
+```cmd
+# Update transactions with intermediate status (last 48 hours)
+docker-compose run --rm easebuzz_clickhouse python app.py --update-status
+
+# Update transactions from last 72 hours
+docker-compose run --rm easebuzz_clickhouse python app.py --update-status 72
+```
 
 ### View Container Logs
 
@@ -266,6 +290,28 @@ Everything else remains exactly the same - all business logic is unchanged.
   - gcc (Required for building Python packages)
   - openssh-client (Required for SSH tunnel)
 
+## Running with Docker Run Command
+
+If you prefer using `docker run` instead of docker-compose, use this command:
+
+```cmd
+docker run --rm ^
+  -e SSH_HOST=3.7.169.181 ^
+  -e SSH_PORT=22 ^
+  -e SSH_USER=ubuntu ^
+  -e SSH_KEY_PATH=/keys/SML_Castlecraft.pem ^
+  -e FETCH_INTERVAL=30 ^
+  -v "D:\Tripura\easebuzz-clickhouse-docker\keys\SML_Castlecraft.pem:/keys/SML_Castlecraft.pem:ro" ^
+  tripuradange15/easebuzz-clickhouse
+```
+
+**Key Points:**
+- Use `-v` to mount the SSH key from your local machine to the container
+- The `:ro` suffix makes the mount read-only for security
+- Adjust the local path if your `.pem` file is in a different location
+- The `--rm` flag automatically removes the container when it exits
+- `FETCH_INTERVAL=30` sets checking every 30 seconds (change to adjust frequency)
+
 ## Support
 
 If you encounter any issues:
@@ -274,6 +320,7 @@ If you encounter any issues:
 2. Verify SSH key is in the correct location
 3. Ensure Docker Desktop is running
 4. Check network connectivity
+5. Make sure the SSH key has correct permissions (Docker will set it to 600 automatically)
 
 ## Quick Reference
 

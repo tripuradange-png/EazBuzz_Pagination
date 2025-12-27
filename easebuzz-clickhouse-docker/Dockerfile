@@ -24,8 +24,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app.py .
 
+# Create the /keys directory for SSH key mounting
+RUN mkdir -p /keys
+
 # Note: SSH keys are mounted at runtime via docker-compose volumes
 # DO NOT copy SSH keys into the image for security reasons
 
-# Run the application
-CMD ["python", "app.py"]
+# Create a script to set SSH key permissions and run the app
+RUN echo '#!/bin/bash\n\
+if [ -f "$SSH_KEY_PATH" ]; then\n\
+    chmod 600 "$SSH_KEY_PATH"\n\
+    echo "SSH key permissions set to 600"\n\
+fi\n\
+exec python app.py' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+# Run the application with entrypoint script
+CMD ["/entrypoint.sh"]

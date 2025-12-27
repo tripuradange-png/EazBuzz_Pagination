@@ -9,13 +9,13 @@ from clickhouse_driver import Client
 
 class ClickHouseDB:
     def __init__(self):
-        # SSH Configuration
+        # SSH Configuration - Use environment variables with fallback to defaults
         self.ssh_host = os.getenv("SSH_HOST", "3.7.169.181")
         self.ssh_port = int(os.getenv("SSH_PORT", "22"))
-        self.ssh_username = os.getenv("SSH_USERNAME", "ubuntu")
-        self.ssh_key_path = os.getenv("SSH_KEY_PATH", "/keys/SML_Castlecraft.pem")
+        self.ssh_username = os.getenv("SSH_USER", "ubuntu")
+        self.ssh_key_path = os.getenv("SSH_KEY_PATH", r"D:\ClickHouse\SML_Castlecraft.pem")
 
-        # ClickHouse Configuration
+        # ClickHouse Configuration - Use environment variables with fallback to defaults
         self.ch_host = os.getenv("CH_HOST", "127.0.0.1")
         self.ch_port = int(os.getenv("CH_PORT", "9000"))
         self.ch_user = os.getenv("CH_USER", "default")
@@ -28,12 +28,17 @@ class ClickHouseDB:
     def connect(self):
         """Establish SSH tunnel and ClickHouse connection"""
         try:
+            # Load SSH private key
+            import paramiko
+            print(f"Loading SSH key from: {self.ssh_key_path}")
+            ssh_key = paramiko.RSAKey.from_private_key_file(self.ssh_key_path)
+
             # Create SSH tunnel
             print("Establishing SSH tunnel...")
             self.tunnel = SSHTunnelForwarder(
                 (self.ssh_host, self.ssh_port),
                 ssh_username=self.ssh_username,
-                ssh_pkey=self.ssh_key_path,
+                ssh_pkey=ssh_key,
                 remote_bind_address=(self.ch_host, self.ch_port),
                 local_bind_address=(self.ch_host, self.ch_port)
             )
@@ -156,25 +161,10 @@ class ClickHouseDB:
                 continue
 
             try:
-                # Handle multiple possible field names for amounts
-                total_amount = (
-                    txn.get('total_debit_amount') or
-                    txn.get('amount') or
-                    txn.get('total_amount') or
-                    0
-                )
-                net_amount = (
-                    txn.get('net_debit_amount') or
-                    txn.get('net_amount_debit') or
-                    txn.get('debit_amount') or
-                    txn.get('amount') or
-                    0
-                )
-
                 data = [(
                     txn.get('status', ''),
-                    float(total_amount),
-                    float(net_amount),
+                    float(txn.get('amount', txn.get('total_debit_amount', 0))),
+                    float(txn.get('net_amount_debit', txn.get('net_debit_amount', 0))),
                     txn.get('easepayid', ''),
                     txn.get('firstname', ''),
                     txn.get('phone', ''),
@@ -218,6 +208,82 @@ class ClickHouseDB:
         except Exception as e:
             print(f"Error checking transaction existence: {e}")
             return False
+
+    def get_transaction_status(self, txnid):
+        """Get the current status of a transaction"""
+        try:
+            query = "SELECT status FROM test_payment_transactions WHERE txnid = %(txnid)s LIMIT 1"
+            result = self.client.execute(query, {'txnid': txnid})
+            if result and len(result) > 0:
+                return result[0][0]
+            return None
+        except Exception as e:
+            print(f"Error getting transaction status: {e}")
+            return None
+
+    def update_transaction(self, txnid, transaction_data):
+        """Update an existing transaction with new data"""
+        try:
+            # Extract transaction data from the API response
+            # The response structure can be: {"status": true/1, "data": {...}} or {"status": true, "msg": {...}}
+            if isinstance(transaction_data, dict) and transaction_data.get('status') in [1, True, 'true']:
+                # Try 'data' first, then 'msg'
+                txn = transaction_data.get('data') or transaction_data.get('msg')
+                if not txn:
+                    print(f"No data/msg in response for {txnid}")
+                    return False
+            else:
+                # Assume transaction_data is already the transaction object
+                txn = transaction_data
+
+            query = """
+            ALTER TABLE test_payment_transactions
+            UPDATE
+                status = %(status)s,
+                total_debit_amount = %(total_debit_amount)s,
+                net_debit_amount = %(net_debit_amount)s,
+                addedon = %(addedon)s,
+                error_message = %(error_message)s
+            WHERE txnid = %(txnid)s
+            """
+
+            # Handle both 'error_Message' (from API) and 'error_message'
+            error_msg = txn.get('error_message') or txn.get('error_Message', 'NA')
+
+            params = {
+                'txnid': txnid,
+                'status': txn.get('status', ''),
+                'total_debit_amount': float(txn.get('amount', txn.get('total_debit_amount', 0))),
+                'net_debit_amount': float(txn.get('net_amount_debit', txn.get('net_debit_amount', 0))),
+                'addedon': txn.get('addedon', ''),
+                'error_message': error_msg
+            }
+
+            self.client.execute(query, params)
+            return True
+        except Exception as e:
+            print(f"Error updating transaction {txnid}: {e}")
+            return False
+
+    def get_intermediate_status_transactions(self, hours_lookback=48):
+        """
+        Get all transactions with intermediate statuses from the last N hours
+
+        Returns:
+            list: List of (txnid, status, addedon, amount) tuples
+        """
+        try:
+            query = f"""
+            SELECT txnid, status, addedon, total_debit_amount
+            FROM test_payment_transactions
+            WHERE status IN ('initiated', 'pending', 'preinitiated', 'true', 'True')
+              AND parseDateTimeBestEffort(addedon) >= subtractHours(now(), {hours_lookback})
+            ORDER BY parseDateTimeBestEffort(addedon) DESC
+            """
+            return self.client.execute(query)
+        except Exception as e:
+            print(f"Error getting intermediate status transactions: {e}")
+            return []
 
     def insert_detailed_transactions(self, detailed_responses):
         """Insert detailed transaction responses into ClickHouse, skipping duplicates"""
@@ -265,25 +331,10 @@ class ClickHouseDB:
                 # Handle both 'error_Message' (from API) and 'error_message'
                 error_msg = txn.get('error_message') or txn.get('error_Message', '')
 
-                # Handle multiple possible field names for amounts
-                total_amount = (
-                    txn.get('total_debit_amount') or
-                    txn.get('amount') or
-                    txn.get('total_amount') or
-                    0
-                )
-                net_amount = (
-                    txn.get('net_debit_amount') or
-                    txn.get('net_amount_debit') or
-                    txn.get('debit_amount') or
-                    txn.get('amount') or
-                    0
-                )
-
                 data = [(
                     txn.get('status', ''),
-                    float(total_amount),
-                    float(net_amount),
+                    float(txn.get('amount', txn.get('total_debit_amount', 0))),
+                    float(txn.get('net_amount_debit', txn.get('net_debit_amount', 0))),
                     txn.get('easepayid', ''),
                     txn.get('firstname', ''),
                     txn.get('phone', ''),
@@ -302,8 +353,6 @@ class ClickHouseDB:
                 self.client.execute(insert_query, data)
                 inserted_count += 1
                 print(f"[OK] Inserted transaction {txnid}")
-                print(f"     total_amount: {total_amount}")
-                print(f"     net_amount: {net_amount}")
                 print(f"     addedon: {txn.get('addedon', 'N/A')}")
                 print(f"     error_message: {error_msg or 'N/A'}")
             except Exception as e:
@@ -319,13 +368,13 @@ class ClickHouseDB:
     def get_transactions_with_details(self, limit=10):
         """Retrieve and display transactions with addedon and error_message fields"""
         try:
-            query = """
+            query = f"""
             SELECT txnid, firstname, phone, status, addedon, error_message, created_at
             FROM test_payment_transactions
             ORDER BY created_at DESC
-            LIMIT %(limit)s
+            LIMIT {limit}
             """
-            result = self.client.execute(query, {'limit': limit})
+            result = self.client.execute(query)
 
             if result:
                 print(f"\n{'='*120}")
@@ -490,7 +539,7 @@ class EasebuzzAPI:
             payload["page"] = page_token
 
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
 
             data = response.json()
@@ -500,21 +549,22 @@ class EasebuzzAPI:
 
             return data
 
+        except requests.exceptions.Timeout:
+            print(f"Error: Request timed out after 30 seconds")
+            return None
         except requests.exceptions.RequestException as e:
             print(f"Error retrieving transactions: {e}")
-            if hasattr(e.response, 'text'):
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 print(f"Response: {e.response.text}")
             return None
 
-    def retrieve_transaction_details(self, txnid, hash_value, max_retries=2):
+    def retrieve_transaction_details(self, txnid, hash_value):
         """
         Retrieve detailed information for a specific transaction.
-        Automatically retries with token refresh on 403 errors.
 
         Args:
             txnid (str): Transaction ID to retrieve
             hash_value (str): Hash value for request authentication
-            max_retries (int): Maximum number of retries on 403 errors (default: 2)
 
         Returns:
             dict: Transaction details if successful, None otherwise
@@ -534,116 +584,75 @@ class EasebuzzAPI:
             "Cookie": "/'; Path=/"
         }
 
-        # Retry logic for handling 403 authentication errors
-        for attempt in range(max_retries + 1):
-            payload = {
-                "key": self.merchant_key,
-                "txnid": txnid,
-                "hash": hash_value,
-                "additional_data": "transaction_date",
-                "token": self.token
-            }
+        payload = {
+            "key": self.merchant_key,
+            "txnid": txnid,
+            "hash": hash_value,
+            "additional_data": "transaction_date",
+            "token": self.token
+        }
 
-            try:
-                if attempt == 0:
-                    print(f"\nMaking API request to: {url}")
-                    print(f"Request Payload:\n{json.dumps(payload, indent=2)}")
-                else:
-                    print(f"\n[RETRY {attempt}/{max_retries}] Retrying with fresh token...")
+        try:
+            print(f"\nMaking API request to: {url}")
+            print(f"Request Payload:\n{json.dumps(payload, indent=2)}")
 
-                response = requests.post(url, headers=headers, json=payload)
-                response.raise_for_status()
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
 
-                data = response.json()
+            data = response.json()
 
-                # Enhanced console output with full details
-                print("\n" + "="*100)
-                print("=" * 100)
-                print(f"{'TRANSACTION DETAILS - FULL RESPONSE':^100}")
-                print("=" * 100)
-                print(f"Transaction ID: {txnid}")
-                print(f"HTTP Status Code: {response.status_code}")
-                print(f"Response Time: {response.elapsed.total_seconds():.2f} seconds")
-                print("-" * 100)
+            # Enhanced console output with full details
+            print("\n" + "="*100)
+            print("=" * 100)
+            print(f"{'TRANSACTION DETAILS - FULL RESPONSE':^100}")
+            print("=" * 100)
+            print(f"Transaction ID: {txnid}")
+            print(f"HTTP Status Code: {response.status_code}")
+            print(f"Response Time: {response.elapsed.total_seconds():.2f} seconds")
+            print("-" * 100)
 
-                # Pretty print the full JSON response
-                print("\nCOMPLETE API RESPONSE:")
-                print("-" * 100)
-                response_str = json.dumps(data, indent=4, ensure_ascii=False)
-                print(response_str)
-                print("-" * 100)
+            # Pretty print the full JSON response
+            print("\nCOMPLETE API RESPONSE:")
+            print("-" * 100)
+            response_str = json.dumps(data, indent=4, ensure_ascii=False)
+            print(response_str)
+            print("-" * 100)
 
-                # If there's transaction data, display it in a structured format
-                if isinstance(data, dict):
-                    if data.get('status') == 1 and data.get('data'):
-                        txn_data = data.get('data', {})
-                        print("\nDETAILED TRANSACTION FIELDS:")
-                        print("-" * 100)
-                        for key, value in sorted(txn_data.items()):
-                            print(f"{key:30s} : {value}")
-                        print("-" * 100)
+            # If there's transaction data, display it in a structured format
+            if isinstance(data, dict):
+                if data.get('status') == 1 and data.get('data'):
+                    txn_data = data.get('data', {})
+                    print("\nDETAILED TRANSACTION FIELDS:")
+                    print("-" * 100)
+                    for key, value in sorted(txn_data.items()):
+                        print(f"{key:30s} : {value}")
+                    print("-" * 100)
 
-                        # Highlight addedon and error_message
-                        print("\n" + "!"*100)
-                        print(f"{'KEY FIELDS FOR DATABASE':^100}")
-                        print("!"*100)
-                        print(f"addedon        : {txn_data.get('addedon', 'NOT FOUND')}")
-                        print(f"error_message  : {txn_data.get('error_message', 'NOT FOUND')}")
-                        print("!"*100)
-                    elif data.get('msg'):
-                        print(f"\nAPI Message: {data.get('msg')}")
-                        print("-" * 100)
+                    # Highlight addedon and error_message
+                    print("\n" + "!"*100)
+                    print(f"{'KEY FIELDS FOR DATABASE':^100}")
+                    print("!"*100)
+                    print(f"addedon        : {txn_data.get('addedon', 'NOT FOUND')}")
+                    print(f"error_message  : {txn_data.get('error_message', 'NOT FOUND')}")
+                    print("!"*100)
+                elif data.get('msg'):
+                    print(f"\nAPI Message: {data.get('msg')}")
+                    print("-" * 100)
 
-                print("=" * 100)
-                print("\n")
+            print("=" * 100)
+            print("\n")
 
-                return data
+            return data
 
-            except requests.exceptions.HTTPError as e:
-                # Handle 403 Forbidden errors with token refresh and retry
-                if hasattr(e, 'response') and e.response is not None and e.response.status_code == 403:
-                    print("\n" + "!"*80)
-                    print(f"⚠️  403 FORBIDDEN ERROR - Authentication failed for {txnid}")
-                    print(f"Response: {e.response.text}")
-
-                    if attempt < max_retries:
-                        print(f"🔄 Refreshing authentication token and retrying (attempt {attempt + 1}/{max_retries})...")
-                        print("!"*80 + "\n")
-
-                        # Force token refresh
-                        if not self.get_auth_token(force_refresh=True):
-                            print("Failed to refresh authentication token.")
-                            return None
-
-                        # Continue to next retry attempt
-                        continue
-                    else:
-                        print(f"❌ Max retries ({max_retries}) reached. Giving up on transaction {txnid}")
-                        print("!"*80 + "\n")
-                        return None
-                else:
-                    # Other HTTP errors - don't retry
-                    print("\n" + "="*80)
-                    print(f"ERROR retrieving transaction details for {txnid}")
-                    print(f"Error: {e}")
-                    print(f"Status Code: {e.response.status_code}")
-                    print(f"Response: {e.response.text}")
-                    print("="*80 + "\n")
-                    return None
-
-            except requests.exceptions.RequestException as e:
-                # Network or other errors - don't retry
-                print("\n" + "="*80)
-                print(f"ERROR retrieving transaction details for {txnid}")
-                print(f"Error: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    print(f"Status Code: {e.response.status_code}")
-                    print(f"Response: {e.response.text}")
-                print("="*80 + "\n")
-                return None
-
-        # Should never reach here, but just in case
-        return None
+        except requests.exceptions.RequestException as e:
+            print("\n" + "="*80)
+            print(f"ERROR retrieving transaction details for {txnid}")
+            print(f"Error: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Status Code: {e.response.status_code}")
+                print(f"Response: {e.response.text}")
+            print("="*80 + "\n")
+            return None
 
     def get_all_transactions(self, start_date, end_date, hash_value, show_page_tables=True, db_handler=None):
         """
@@ -722,29 +731,34 @@ class EasebuzzAPI:
 
         return all_transactions
 
-    def get_and_retrieve_transaction_details(self, start_date, end_date, hash_value, limit=None):
+    def get_and_retrieve_transaction_details(self, start_date, end_date, hash_value, limit=None, db_handler=None):
         """
         Fetch transactions by date and retrieve detailed information for each transaction.
-        Handles pagination automatically to fetch ALL transactions.
+        Now supports pagination to fetch ALL transactions with automatic token refresh.
 
         Args:
             start_date (str): Start date in format "DD-MM-YYYY"
             end_date (str): End date in format "DD-MM-YYYY"
             hash_value (str): Hash value for request authentication
             limit (int, optional): Limit number of transactions to retrieve details for
+            db_handler: ClickHouseDB instance to push data in batches (optional)
 
         Returns:
             list: List of detailed transaction data
         """
-        print("\n=== Step 1: Fetching ALL transactions by date (with pagination) ===")
+        print("\n=== Step 1: Fetching ALL transactions by date with pagination ===")
 
-        # Get ALL transactions from date API with pagination
         all_transactions = []
         page_token = None
         page_number = 1
 
+        # Fetch all pages
         while True:
-            print(f"\nFetching page {page_number}...")
+            print(f"\n{'='*80}")
+            print(f"--- Fetching transaction list page {page_number} ---")
+            print(f"{'='*80}")
+
+            # Get transactions from date API
             result = self.get_transactions_by_date(
                 start_date=start_date,
                 end_date=end_date,
@@ -753,19 +767,21 @@ class EasebuzzAPI:
             )
 
             if not result or not result.get('status'):
-                print("Failed to fetch transactions or no more data")
+                print("Failed to fetch transactions")
                 break
 
             transactions = result.get('data', [])
             all_transactions.extend(transactions)
-            print(f"Retrieved {len(transactions)} transactions from page {page_number} (Total so far: {len(all_transactions)})")
+            print(f"Retrieved {len(transactions)} transactions from page {page_number}")
+            print(f"Total transactions so far: {len(all_transactions)}")
 
             # Check if there's a next page
             next_token = result.get('next')
             if not next_token:
-                print(f"\nNo more pages. Total transactions fetched: {len(all_transactions)}")
+                print(f"\nNo more pages. Total transactions found: {len(all_transactions)}")
                 break
 
+            # Use the next token for the next iteration
             page_token = next_token
             page_number += 1
 
@@ -773,26 +789,67 @@ class EasebuzzAPI:
             print("No transactions found")
             return []
 
-        print(f"\n✓ Successfully fetched {len(all_transactions)} total transactions across {page_number} pages")
-
         # Apply limit if specified
-        transactions = all_transactions
+        transactions_to_process = all_transactions
         if limit:
-            transactions = all_transactions[:limit]
-            print(f"Limiting to first {limit} transactions")
+            transactions_to_process = all_transactions[:limit]
+            print(f"\nLimiting to first {limit} transactions out of {len(all_transactions)} total")
 
-        print("\n=== Step 2: Retrieving detailed information for each transaction ===")
+        print(f"\n{'='*100}")
+        print(f"=== Step 2: Retrieving detailed information for {len(transactions_to_process)} transactions ===")
+        print(f"{'='*100}")
 
         detailed_transactions = []
+        batch_size = 50  # Insert to DB every 50 transactions
 
-        for idx, txn in enumerate(transactions, 1):
+        for idx, txn in enumerate(transactions_to_process, 1):
             txnid = txn.get('txnid')
             if not txnid:
-                print(f"[{idx}/{len(transactions)}] Skipping - No txnid found")
+                print(f"[{idx}/{len(transactions_to_process)}] Skipping - No txnid found")
                 continue
 
+            # Check if already in database
+            if db_handler and db_handler.transaction_exists(txnid):
+                # Get current status
+                current_status = db_handler.get_transaction_status(txnid)
+
+                # If status is intermediate (initiated, pending, preinitiated, true), check for updates
+                if current_status in ['initiated', 'pending', 'preinitiated', 'true', 'True']:
+                    # Fetch latest details to check for status change
+                    latest_details = self.retrieve_transaction_details(txnid, hash_value)
+
+                    if latest_details:
+                        # Extract actual transaction data from API response
+                        if isinstance(latest_details, dict) and latest_details.get('status') in [1, True, 'true']:
+                            txn = latest_details.get('data') or latest_details.get('msg')
+                            latest_status = txn.get('status', '') if txn else ''
+                        else:
+                            latest_status = latest_details.get('status', '')
+
+                        # If status changed to a final state, update the transaction
+                        if latest_status != current_status and latest_status not in ['initiated', 'pending', 'preinitiated', 'true', 'True']:
+                            if db_handler.update_transaction(txnid, latest_details):
+                                print(f"[{idx}/{len(transactions_to_process)}] Updated: {txnid} ({current_status} -> {latest_status})")
+                            else:
+                                print(f"[{idx}/{len(transactions_to_process)}] Update failed: {txnid}")
+                        else:
+                            print(f"[{idx}/{len(transactions_to_process)}] No status change: {txnid} (still {current_status})")
+                    else:
+                        print(f"[{idx}/{len(transactions_to_process)}] Could not fetch latest details: {txnid}")
+                else:
+                    print(f"[{idx}/{len(transactions_to_process)}] Skipping - Already in database with final status: {txnid} ({current_status})")
+
+                continue
+
+            # Refresh token every 100 transactions or if expired
+            if idx % 100 == 0 or self.is_token_expired():
+                print(f"\n[Token Refresh] Refreshing authentication token...")
+                if not self.get_auth_token(force_refresh=True):
+                    print(f"[ERROR] Failed to refresh token at transaction {idx}")
+                    break
+
             print(f"\n{'*'*80}")
-            print(f"[{idx}/{len(transactions)}] Fetching details for txnid: {txnid}")
+            print(f"[{idx}/{len(transactions_to_process)}] Fetching details for txnid: {txnid}")
             print(f"{'*'*80}")
 
             # Retrieve detailed transaction information
@@ -800,17 +857,30 @@ class EasebuzzAPI:
 
             if details:
                 detailed_transactions.append(details)
-                print(f"[OK] Successfully retrieved details for transaction {idx}/{len(transactions)}")
+                print(f"[OK] Successfully retrieved details for transaction {idx}/{len(transactions_to_process)}")
+
+                # Insert in batches if db_handler provided
+                if db_handler and len(detailed_transactions) >= batch_size:
+                    print(f"\n[Batch Insert] Inserting {len(detailed_transactions)} transactions to database...")
+                    inserted = db_handler.insert_detailed_transactions(detailed_transactions)
+                    print(f"[Batch Insert] Successfully inserted {inserted} transactions")
+                    detailed_transactions = []  # Clear batch
             else:
-                print(f"[FAIL] Failed to retrieve details for transaction {idx}/{len(transactions)}")
+                print(f"[FAIL] Failed to retrieve details for transaction {idx}/{len(transactions_to_process)}")
+
+        # Insert any remaining transactions in final batch
+        if db_handler and len(detailed_transactions) > 0:
+            print(f"\n[Final Batch Insert] Inserting remaining {len(detailed_transactions)} transactions to database...")
+            inserted = db_handler.insert_detailed_transactions(detailed_transactions)
+            print(f"[Final Batch Insert] Successfully inserted {inserted} transactions")
 
         print(f"\n{'='*100}")
         print(f"{'='*100}")
         print(f"{'FINAL SUMMARY':^100}")
         print(f"{'='*100}")
-        print(f"Total transactions found: {len(transactions)}")
-        print(f"Successfully retrieved details: {len(detailed_transactions)}")
-        print(f"Failed: {len(transactions) - len(detailed_transactions)}")
+        print(f"Total transactions found across all pages: {len(all_transactions)}")
+        print(f"Transactions processed for details: {len(transactions_to_process)}")
+        print(f"Successfully retrieved details: {len(detailed_transactions) if not db_handler else 'Inserted in batches'}")
         print(f"{'='*100}\n")
 
         # Display consolidated view of all retrieved transactions
@@ -857,61 +927,58 @@ def main():
             # Step 3: Retrieve transactions
             hash_value = "b80cdee1da064dc20f50d4fd87b70a2d81bf4cb3fc6945fa50072498d77dae75e7158bcdbad619e03fa8f524fa4ddcf742a54b61a6798fb9fa3dc43fd99bcf94"
 
-            # Calculate date range: from 01-09-2025 to today
-            start_date = "01-09-2025"
-            end_date = datetime.now().strftime("%d-%m-%Y")
+            # Get the last transaction date from database to know where to start fetching
+            print("\n=== Checking last transaction in database ===")
+            last_txn_result = db.client.execute("SELECT MAX(created_at) FROM test_payment_transactions")
+            last_created_at = last_txn_result[0][0] if last_txn_result[0][0] else None
 
-            print(f"\n=== Fetching transactions from {start_date} to {end_date} ===")
+            if last_created_at:
+                # Fetch from 7 days ago to ensure we catch everything (including out-of-order transactions)
+                from datetime import datetime as dt, timedelta
+                start_date_obj = dt.now() - timedelta(days=7)
+                start_date = start_date_obj.strftime("%d-%m-%Y")
+                print(f"Last sync in DB: {last_created_at}")
+                print(f"Will fetch from: {start_date} (last 7 days to catch any missed transactions)")
+            else:
+                # No data in DB, start from 30 days ago to get all historical data
+                from datetime import datetime as dt, timedelta
+                start_date_obj = dt.now() - timedelta(days=30)
+                start_date = start_date_obj.strftime("%d-%m-%Y")
+                print(f"No transactions in DB yet. Starting from: {start_date} (last 30 days)")
+
+            # Always use today as end date to get latest data
+            end_date = datetime.now().strftime("%d-%m-%Y")
+            print(f"Fetching up to: {end_date} (current date)")
 
             # OPTION 1: Fetch transaction details dynamically from date API
-            print("\n=== NEW FEATURE: Fetching transaction details dynamically ===")
+            print("\n=== Fetching all available transactions with auto token refresh ===")
             detailed_transactions = easebuzz.get_and_retrieve_transaction_details(
                 start_date=start_date,
                 end_date=end_date,
-                hash_value=hash_value
-                # No limit - fetch all transactions
+                hash_value=hash_value,
+                limit=None,  # Fetch all transactions
+                db_handler=db  # Pass database handler for batch insertion and duplicate checking
             )
 
-            if detailed_transactions:
-                print(f"\n{'#'*100}")
-                print(f"{'SUCCESS':^100}")
-                print(f"{'#'*100}")
-                print(f"[OK] Retrieved detailed information for {len(detailed_transactions)} transactions")
+            print(f"\n{'#'*100}")
+            print(f"{'SUCCESS':^100}")
+            print(f"{'#'*100}")
+            print(f"[OK] Completed processing transactions from {start_date} to {end_date}")
+            print(f"[OK] All transactions inserted in batches directly to database")
 
-                # Save detailed transactions to JSON
-                output_file = 'detailed_transactions.json'
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    json.dump(detailed_transactions, f, indent=4, ensure_ascii=False)
+            # Get updated total count from database
+            total_in_db = db.get_transaction_count()
+            print(f"[OK] Total transactions in database: {total_in_db}")
 
-                print(f"[OK] Detailed transactions saved to '{output_file}'")
+            # Display recent transactions with addedon and error_message
+            print(f"\n=== Verifying Saved Data (Last 20 transactions) ===")
+            db.get_transactions_with_details(limit=20)
 
-                # Insert detailed transactions into database
-                print(f"\n=== Inserting detailed transactions into ClickHouse ===")
-                inserted_count = db.insert_detailed_transactions(detailed_transactions)
-                print(f"[OK] Inserted {inserted_count} detailed transactions into database")
-
-                # Get updated total count from database
-                total_in_db = db.get_transaction_count()
-                print(f"[OK] Total transactions in database: {total_in_db}")
-
-                # Display the inserted transactions with addedon and error_message
-                print(f"\n=== Verifying Saved Data ===")
-                db.get_transactions_with_details(limit=inserted_count)
-
-                print(f"\nYou can view the full records in:")
-                print(f"  1. Console output above (search for 'TRANSACTION DETAILS - FULL RESPONSE')")
-                print(f"  2. File: {output_file}")
-                print(f"  3. ClickHouse database table: test_payment_transactions")
-                print(f"     Fields saved: addedon, error_message (along with all other fields)")
-                print(f"  4. Verification table above showing addedon & error_message values")
-                print(f"{'#'*100}\n")
-            else:
-                print(f"\n{'!'*100}")
-                print(f"{'WARNING':^100}")
-                print(f"{'!'*100}")
-                print("No detailed transactions were retrieved.")
-                print("Check the console output above for any errors.")
-                print(f"{'!'*100}\n")
+            print(f"\nData successfully saved to:")
+            print(f"  1. ClickHouse database table: test_payment_transactions")
+            print(f"     Fields saved: addedon, error_message (along with all other fields)")
+            print(f"  2. Verification table above showing addedon & error_message values")
+            print(f"{'#'*100}\n")
 
             # print("\n" + "="*80)
 
@@ -927,7 +994,7 @@ def main():
 
             if False:  # Disabled for now
                 all_transactions = []
-                print(f"\n✓ Successfully fetched {len(all_transactions)} total transactions!")
+                print(f"\n[OK] Successfully fetched {len(all_transactions)} total transactions!")
 
                 # Display summary
                 print("\n=== Transaction Summary ===")
@@ -948,14 +1015,14 @@ def main():
                 # Save to JSON file
                 with open('transactions.json', 'w') as f:
                     json.dump(all_transactions, f, indent=2)
-                print("\n✓ All transactions saved to 'transactions.json'")
+                print("\n[OK] All transactions saved to 'transactions.json'")
             else:
-                print("\n✗ Failed to retrieve transactions")
+                print("\n[INFO] Failed to retrieve transactions")
         else:
-            print("\n✗ Authentication failed")
+            print("\n[ERROR] Authentication failed")
 
     except Exception as e:
-        print(f"\n✗ Error in main execution: {e}")
+        print(f"\n[ERROR] Error in main execution: {e}")
 
     finally:
         # Always disconnect from database
@@ -963,5 +1030,223 @@ def main():
         db.disconnect()
 
 
+def update_intermediate_statuses(hours_lookback=48):
+    """
+    Periodic job to update transactions stuck in intermediate status
+    This should be run separately every 1-2 hours
+
+    Args:
+        hours_lookback: How many hours back to check (default: 48)
+    """
+    print(f"\n{'='*100}")
+    print(f"PERIODIC STATUS UPDATE JOB - Checking last {hours_lookback} hours")
+    print(f"{'='*100}\n")
+
+    # Initialize API and database
+    easebuzz = EasebuzzAPI()
+    db = ClickHouseDB()
+
+    try:
+        # Connect to database
+        print("=== Connecting to ClickHouse ===")
+        if not db.connect():
+            print("Failed to connect to ClickHouse. Exiting...")
+            return
+
+        # Authenticate with Easebuzz
+        print("\n=== Authenticating with Easebuzz ===")
+        if not easebuzz.get_auth_token():
+            print("Failed to authenticate. Exiting...")
+            return
+
+        hash_value = "b80cdee1da064dc20f50d4fd87b70a2d81bf4cb3fc6945fa50072498d77dae75e7158bcdbad619e03fa8f524fa4ddcf742a54b61a6798fb9fa3dc43fd99bcf94"
+
+        # Get transactions with intermediate statuses
+        print(f"\n=== Finding transactions with intermediate statuses (last {hours_lookback}h) ===")
+        intermediate_txns = db.get_intermediate_status_transactions(hours_lookback)
+
+        if not intermediate_txns or len(intermediate_txns) == 0:
+            print(f"[OK] No intermediate status transactions found in last {hours_lookback} hours")
+            print("All transactions are up to date!")
+            return
+
+        print(f"Found {len(intermediate_txns)} transactions to check\n")
+
+        # Update each transaction
+        updated_count = 0
+        no_change_count = 0
+        error_count = 0
+
+        for idx, (txnid, current_status, addedon, current_amount) in enumerate(intermediate_txns, 1):
+            if idx % 50 == 0:
+                print(f"\n[Progress] Processed {idx}/{len(intermediate_txns)} transactions...")
+
+            # Fetch latest details from API
+            details = easebuzz.retrieve_transaction_details(txnid, hash_value)
+
+            if details:
+                # Extract actual status and amount from msg
+                if isinstance(details, dict) and details.get('status') in [1, True, 'true']:
+                    txn = details.get('data') or details.get('msg')
+                    if txn:
+                        actual_status = txn.get('status', '')
+                        actual_amount = float(txn.get('amount', txn.get('total_debit_amount', 0)))
+
+                        # Check if status or amount changed
+                        status_changed = actual_status != current_status
+                        amount_changed = abs(actual_amount - float(current_amount)) > 0.01
+
+                        if status_changed or amount_changed:
+                            if db.update_transaction(txnid, details):
+                                changes = []
+                                if status_changed:
+                                    changes.append(f"{current_status} -> {actual_status}")
+                                if amount_changed:
+                                    changes.append(f"Rs.{current_amount} -> Rs.{actual_amount}")
+
+                                print(f"[{idx}/{len(intermediate_txns)}] Updated {txnid[:35]:<35} | {' | '.join(changes)}")
+                                updated_count += 1
+                            else:
+                                print(f"[{idx}/{len(intermediate_txns)}] [ERROR] Update failed: {txnid}")
+                                error_count += 1
+                        else:
+                            no_change_count += 1
+                    else:
+                        error_count += 1
+                else:
+                    error_count += 1
+            else:
+                error_count += 1
+
+            # Refresh token every 100 transactions
+            if idx % 100 == 0:
+                print(f"\n[Token Refresh] Refreshing authentication...")
+                easebuzz.get_auth_token(force_refresh=True)
+
+        # Print summary
+        print(f"\n{'='*100}")
+        print("UPDATE SUMMARY")
+        print(f"{'='*100}")
+        print(f"Total transactions checked: {len(intermediate_txns)}")
+        print(f"Successfully updated: {updated_count}")
+        print(f"No change needed: {no_change_count}")
+        print(f"Errors: {error_count}")
+        print(f"{'='*100}\n")
+
+        if updated_count > 0:
+            print(f"[SUCCESS] Updated {updated_count} transactions with latest status/amounts")
+        else:
+            print("[OK] All checked transactions are already up to date")
+
+    except Exception as e:
+        print(f"\n[ERROR] Error in update job: {e}")
+        import traceback
+        traceback.print_exc()
+
+    finally:
+        db.disconnect()
+
+
+def run_continuous_sync(poll_interval=300, status_update_interval=7200):
+    """
+    Run continuous polling mode - syncs new transactions at regular intervals
+
+    Args:
+        poll_interval: Seconds between transaction syncs (default: 300 = 5 minutes)
+        status_update_interval: Seconds between status updates (default: 7200 = 2 hours)
+    """
+    import time
+
+    print("\n" + "="*100)
+    print("EASEBUZZ CLICKHOUSE CONTINUOUS SYNC SERVICE")
+    print("="*100)
+    print(f"Transaction Sync Interval: Every {poll_interval//60} minutes")
+    print(f"Status Update Interval: Every {status_update_interval//60} minutes")
+    print("Press Ctrl+C to stop")
+    print("="*100 + "\n")
+
+    last_status_update = 0
+    sync_count = 0
+
+    try:
+        while True:
+            sync_count += 1
+            current_time = time.time()
+
+            print(f"\n{'='*100}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] SYNC #{sync_count} - Starting transaction sync...")
+            print(f"{'='*100}\n")
+
+            try:
+                # Run main sync
+                main()
+
+                # Check if it's time for status update
+                if current_time - last_status_update >= status_update_interval:
+                    print(f"\n{'='*100}")
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running periodic status update...")
+                    print(f"{'='*100}\n")
+                    update_intermediate_statuses(hours_lookback=48)
+                    last_status_update = current_time
+
+                print(f"\n{'='*100}")
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Sync completed successfully!")
+                print(f"Next sync in {poll_interval//60} minutes...")
+                print(f"{'='*100}\n")
+
+            except Exception as e:
+                print(f"\n[ERROR] Sync failed: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"Will retry in {poll_interval//60} minutes...\n")
+
+            # Wait before next sync
+            time.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        print("\n\n" + "="*100)
+        print("SYNC SERVICE STOPPED BY USER")
+        print(f"Total syncs completed: {sync_count}")
+        print("="*100 + "\n")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    # Check command line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] == '--continuous' or sys.argv[1] == '--live':
+            # Continuous polling mode
+            poll_interval = 300  # 5 minutes default
+            status_interval = 7200  # 2 hours default
+
+            # Allow custom intervals
+            if len(sys.argv) > 2:
+                try:
+                    poll_interval = int(sys.argv[2]) * 60  # Convert minutes to seconds
+                except:
+                    pass
+
+            if len(sys.argv) > 3:
+                try:
+                    status_interval = int(sys.argv[3]) * 60  # Convert minutes to seconds
+                except:
+                    pass
+
+            run_continuous_sync(poll_interval, status_interval)
+
+        elif sys.argv[1] == '--update-status':
+            # Run periodic status update
+            hours = 48
+            if len(sys.argv) > 2:
+                try:
+                    hours = int(sys.argv[2])
+                except:
+                    pass
+            update_intermediate_statuses(hours_lookback=hours)
+        else:
+            # Run normal sync
+            main()
+    else:
+        # Run normal sync (single run)
+        main()
