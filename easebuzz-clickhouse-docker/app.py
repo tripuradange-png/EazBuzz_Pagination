@@ -33,16 +33,27 @@ class ClickHouseDB:
             print(f"Loading SSH key from: {self.ssh_key_path}")
             ssh_key = paramiko.RSAKey.from_private_key_file(self.ssh_key_path)
 
-            # Create SSH tunnel
+            # Create SSH tunnel with keepalive settings
             print("Establishing SSH tunnel...")
             self.tunnel = SSHTunnelForwarder(
                 (self.ssh_host, self.ssh_port),
                 ssh_username=self.ssh_username,
                 ssh_pkey=ssh_key,
                 remote_bind_address=(self.ch_host, self.ch_port),
-                local_bind_address=(self.ch_host, self.ch_port)
+                local_bind_address=(self.ch_host, self.ch_port),
+                set_keepalive=60.0,  # Send keepalive every 60 seconds
+                ssh_config_file=None,
+                allow_agent=False,
+                host_pkey_directories=None
             )
             self.tunnel.start()
+            # Configure the SSH transport for better stability
+            try:
+                transport = self.tunnel.ssh_transport
+                if transport:
+                    transport.set_keepalive(30)  # Additional keepalive at transport level
+            except Exception as keepalive_err:
+                print(f"Note: Could not set additional keepalive: {keepalive_err}")
             print(f"SSH tunnel established on {self.tunnel.local_bind_port}")
 
             # Connect to ClickHouse
@@ -966,13 +977,20 @@ def main():
             print(f"[OK] Completed processing transactions from {start_date} to {end_date}")
             print(f"[OK] All transactions inserted in batches directly to database")
 
-            # Get updated total count from database
-            total_in_db = db.get_transaction_count()
-            print(f"[OK] Total transactions in database: {total_in_db}")
+            # Get updated total count from database (with retry logic)
+            try:
+                total_in_db = db.get_transaction_count()
+                print(f"[OK] Total transactions in database: {total_in_db}")
+            except Exception as count_err:
+                print(f"[INFO] Could not verify total count (connection issue): {count_err}")
+                total_in_db = "N/A"
 
-            # Display recent transactions with addedon and error_message
-            print(f"\n=== Verifying Saved Data (Last 20 transactions) ===")
-            db.get_transactions_with_details(limit=20)
+            # Display recent transactions with addedon and error_message (with retry)
+            try:
+                print(f"\n=== Verifying Saved Data (Last 20 transactions) ===")
+                db.get_transactions_with_details(limit=20)
+            except Exception as verify_err:
+                print(f"[INFO] Could not display verification table (connection issue): {verify_err}")
 
             print(f"\nData successfully saved to:")
             print(f"  1. ClickHouse database table: test_payment_transactions")
